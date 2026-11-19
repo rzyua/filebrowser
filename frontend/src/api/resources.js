@@ -307,7 +307,10 @@ export async function download(format, files, shareHash = "") {
     return await downloadChunked(files[0], shareHash)
   }
 
-  if (format !== 'zip') {
+  // fork: zip is the default; tar.gz only when explicitly requested
+  if (format !== 'tar.gz' && format !== 'targz') {
+    format = 'zip'
+  } else {
     format = 'tar.gz'
   }
 

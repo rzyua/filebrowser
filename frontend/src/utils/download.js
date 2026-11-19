@@ -7,6 +7,9 @@ function isSingleFileItem(items) {
   return items.length === 1 && !isDirectoryItem(items[0]);
 }
 
+// fork: archive format used for every multi-file / folder download
+export const DEFAULT_ARCHIVE_FORMAT = "zip";
+
 export default function downloadFiles(items) {
   if (items.length === 0) {
     notify.showError("No files selected");
@@ -49,15 +52,9 @@ export default function downloadFiles(items) {
         void startDownload(null, items, state.shareInfo.hash);
       }
     } else {
-      // Multiple files download with user confirmation
-      mutations.showPrompt({
-        name: "download",
-        confirm: (format) => {
-          mutations.closeTopPrompt();
-          void startDownload(format, items, state.shareInfo.hash, {
-            silentChunkedError: willUseChunkedArchive,
-          });
-        },
+      // fork: always download multiple files as zip, no format prompt
+      void startDownload(DEFAULT_ARCHIVE_FORMAT, items, state.shareInfo.hash, {
+        silentChunkedError: willUseChunkedArchive,
       });
     }
     return;
@@ -71,15 +68,9 @@ export default function downloadFiles(items) {
       void startDownload(null, items);
     }
   } else {
-    // Multiple files download with user confirmation
-    mutations.showPrompt({
-      name: "download",
-      confirm: (format) => {
-        mutations.closeTopPrompt();
-        void startDownload(format, items, "", {
-          silentChunkedError: willUseChunkedArchive,
-        });
-      },
+    // fork: always download multiple files as zip, no format prompt
+    void startDownload(DEFAULT_ARCHIVE_FORMAT, items, "", {
+      silentChunkedError: willUseChunkedArchive,
     });
   }
 }
@@ -99,7 +90,7 @@ async function startDownload(config, files, hash = "", options = {}) {
   }
 }
 
-/** Show the download format prompt and start the in-app download when confirmed. */
+/** Start the in-app share download as a zip archive (fork: no format prompt). */
 export function showShareDownloadPrompt(items) {
   if (items.length === 0) {
     notify.showError("No files selected");
@@ -134,13 +125,8 @@ export function showShareDownloadPrompt(items) {
     return;
   }
 
-  mutations.showPrompt({
-    name: "download",
-    confirm: (format) => {
-      mutations.closeTopPrompt();
-      void startDownload(format, items, state.shareInfo?.hash || "", {
-        silentChunkedError: willUseChunkedArchive,
-      });
-    },
+  // fork: always download multiple files / folders as zip, no format prompt
+  void startDownload(DEFAULT_ARCHIVE_FORMAT, items, state.shareInfo?.hash || "", {
+    silentChunkedError: willUseChunkedArchive,
   });
 }

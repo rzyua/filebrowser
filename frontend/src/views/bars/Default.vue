@@ -19,6 +19,7 @@
       />
     </div>
     <title v-if="!showSearch" class="topTitle">{{ getTopTitle }}</title>
+    <ShareDownloadAll /> <!-- fork: download-all button for shares -->
     <action
       v-if="showHeaderSwitchView && !disableNavButtons"
       class="menu-button"
@@ -51,6 +52,7 @@ import buttons from "@/utils/buttons";
 import { notify } from "@/notify";
 import { getters, state, mutations } from "@/store";
 import Action from "@/components/Action.vue";
+import ShareDownloadAll from "@/components/fork/ShareDownloadAll.vue"; // fork
 import { globalVars } from "@/utils/constants";
 import { url } from "@/utils";
 
@@ -58,6 +60,7 @@ export default {
   name: "UnifiedHeader",
   components: {
     Action,
+    ShareDownloadAll, // fork
   },
   data() {
     return {

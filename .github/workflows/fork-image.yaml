@@ -1,0 +1,174 @@
+# fork: builds the linux/arm64 Docker image from upstream's _docker/Dockerfile
+# and publishes it to GHCR. See FORK.md.
+name: fork image
+
+on:
+  push:
+    branches:
+      - "custom"
+      - "claude/**"
+      - "feat/**"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push the image to GHCR"
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        type: string
+        required: true
+      push:
+        description: "Push the image to GHCR"
+        type: boolean
+        default: false
+  schedule:
+    # Weekly rebuild of the current version to pick up Alpine security fixes.
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-image-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_URL: https://github.com/gtsteffaniak/filebrowser
+  # Upstream release channel this fork follows.
+  UPSTREAM_TAG_PATTERN: "v*-stable"
+
+jobs:
+  image:
+    name: Build linux/arm64 image
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || (github.event_name == 'schedule' && 'custom') || github.ref }}
+          fetch-depth: 0
+
+      - name: Work out fork version
+        id: version
+        run: |
+          git fetch --quiet --no-tags "$UPSTREAM_URL" "+refs/tags/${UPSTREAM_TAG_PATTERN}:refs/tags/${UPSTREAM_TAG_PATTERN}"
+          base=$(git tag --merged HEAD -l "$UPSTREAM_TAG_PATTERN" --sort=-v:refname | head -n1)
+          if [ -z "$base" ]; then
+            echo "::error::No upstream $UPSTREAM_TAG_PATTERN tag found in this branch's history"
+            exit 1
+          fi
+          n=$(git rev-list --count "${base}..HEAD")
+          version="${base}-rz.${n}"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=${version#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "Fork version: $version (upstream base $base, $n fork commits)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Decide whether to push
+        id: push
+        env:
+          INPUT_PUSH: ${{ inputs.push }}
+        run: |
+          push=false
+          if [ "$INPUT_PUSH" = "true" ]; then push=true; fi
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/custom" ]; then push=true; fi
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then push=true; fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.push.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.version.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.tag }}
+            type=raw,value=stable
+            type=raw,value=latest
+            type=raw,value=sha-${{ steps.version.outputs.sha }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.title=FileBrowser Quantum (rzyua fork)
+
+      - name: Build (load locally for testing)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./_docker/Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            REVISION=${{ steps.version.outputs.sha }}
+          load: true
+          tags: fork-under-test:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=fork-arm64
+          cache-to: type=gha,scope=fork-arm64,mode=max
+
+      - name: Smoke test
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker run --rm --entrypoint ./filebrowser fork-under-test:latest version | tee version.txt
+          grep -q "$EXPECTED_VERSION" version.txt
+          docker run -d --name fb -p 8080:80 fork-under-test:latest
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/health >/dev/null; then
+              echo "healthy after ${i}s"
+              docker rm -f fb >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs fb
+          exit 1
+
+      - name: Vulnerability scan (report only)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: fork-under-test:latest
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table
+
+      - name: Push to GHCR
+        if: steps.push.outputs.push == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./_docker/Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            REVISION=${{ steps.version.outputs.sha }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=fork-arm64
+
+      - name: Summary
+        if: steps.push.outputs.push == 'true'
+        run: |
+          {
+            echo "### Published"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

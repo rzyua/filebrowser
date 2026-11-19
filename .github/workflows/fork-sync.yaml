@@ -1,0 +1,264 @@
+# fork: keeps the `custom` branch rebased on the latest upstream stable release.
+#
+# 1. Daily: if upstream published a newer v*-stable tag, rebase the fork's
+#    patch stack onto it as branch sync/<tag>.
+# 2. Clean rebase -> run tests and build the arm64 image (no push).
+# 3. Wait for approval on the `fork-promote` environment, then force-update
+#    `custom`, snapshot it as snapshot/<tag>, and publish the image.
+# 4. Conflict -> open an issue listing the failing patch and files.
+#
+# Weekly it also dry-runs the rebase onto upstream `main` (next beta) and
+# opens a heads-up issue if a future release would conflict.
+name: fork upstream sync
+
+on:
+  schedule:
+    - cron: "41 5 * * *"   # daily release check
+    - cron: "11 6 * * 3"   # weekly preview against upstream main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to rebase onto (default: newest v*-stable)"
+        type: string
+        required: false
+      preview:
+        description: "Dry-run against upstream main instead"
+        type: boolean
+        default: false
+      branch:
+        description: "Fork branch to sync (use a scratch branch to test; only custom publishes)"
+        type: string
+        default: custom
+
+permissions:
+  contents: write
+  issues: write
+  packages: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/gtsteffaniak/filebrowser
+  UPSTREAM_TAG_PATTERN: "v*-stable"
+  FORK_BRANCH: ${{ inputs.branch || 'custom' }}
+
+jobs:
+  rebase:
+    name: Rebase patch stack
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      status: ${{ steps.rebase.outputs.status }}
+      old: ${{ steps.target.outputs.old }}
+      new: ${{ steps.target.outputs.new }}
+      branch: ${{ steps.rebase.outputs.branch }}
+      fork_branch: ${{ env.FORK_BRANCH }}
+      preview: ${{ steps.target.outputs.preview }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --quiet --no-tags upstream "+refs/tags/${UPSTREAM_TAG_PATTERN}:refs/tags/${UPSTREAM_TAG_PATTERN}" "+refs/heads/main:refs/remotes/upstream/main"
+
+      - name: Restore rerere cache
+        uses: actions/cache@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-${{ github.run_id }}
+          restore-keys: rerere-
+
+      - name: Pick target
+        id: target
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          PREVIEW: ${{ inputs.preview || github.event.schedule == '11 6 * * 3' }}
+        run: |
+          old=$(git tag --merged HEAD -l "$UPSTREAM_TAG_PATTERN" --sort=-v:refname | head -n1)
+          if [ "$PREVIEW" = "true" ]; then
+            new=upstream/main
+          elif [ -n "$INPUT_TAG" ]; then
+            git fetch --quiet --no-tags upstream "+refs/tags/${INPUT_TAG}:refs/tags/${INPUT_TAG}"
+            new="$INPUT_TAG"
+          else
+            new=$(git tag -l "$UPSTREAM_TAG_PATTERN" --sort=-v:refname | head -n1)
+          fi
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "preview=$PREVIEW" >> "$GITHUB_OUTPUT"
+          echo "Fork base: $old, target: $new (preview: $PREVIEW)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rebase
+        id: rebase
+        env:
+          OLD: ${{ steps.target.outputs.old }}
+          NEW: ${{ steps.target.outputs.new }}
+          PREVIEW: ${{ steps.target.outputs.preview }}
+        run: |
+          if [ "$PREVIEW" != "true" ] && [ "$(git rev-parse "$OLD^{commit}")" = "$(git rev-parse "$NEW^{commit}")" ]; then
+            echo "Already on $NEW, nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            echo "status=current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          branch="sync/${NEW#upstream/}"
+          if [ "$FORK_BRANCH" != "custom" ]; then branch="sync-test/${FORK_BRANCH}"; fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          git checkout -q -B "$branch"
+          in_rebase() { [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; }
+          git rebase --onto "$NEW" "$OLD" || true
+          # Conflicts resolved earlier are replayed by rerere; continue while
+          # nothing is left unmerged.
+          for _ in $(seq 1 100); do
+            in_rebase || break
+            git diff --name-only --diff-filter=U | grep -q . && break
+            git add -A
+            GIT_EDITOR=true git rebase --continue || true
+          done
+          if ! in_rebase; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+            git log --format='- %s' "$NEW"..HEAD >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          failing=$(git log -1 --format='%h %s' REBASE_HEAD 2>/dev/null || echo unknown)
+          files=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/')
+          git rebase --abort
+          {
+            echo "Rebasing \`$FORK_BRANCH\` from \`$OLD\` onto \`$NEW\` stopped on:"
+            echo
+            echo "**$failing**"
+            echo
+            echo "Conflicting files:"
+            echo "$files"
+            echo
+            echo "Resolve locally:"
+            echo '```'
+            echo "git fetch upstream --tags"
+            echo "git checkout -B $branch origin/$FORK_BRANCH"
+            echo "git rebase --onto $NEW $OLD"
+            echo '```'
+            echo "Then push \`$branch\` and run the **fork upstream sync** workflow with tag \`${NEW#upstream/}\`, or force-push \`$FORK_BRANCH\` yourself."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > conflict.md
+          cat conflict.md >> "$GITHUB_STEP_SUMMARY"
+          echo "status=conflict" >> "$GITHUB_OUTPUT"
+
+      - name: Report conflict
+        if: steps.rebase.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Without this, gh prefers the "upstream" remote and would target the original repository.
+          GH_REPO: ${{ github.repository }}
+          NEW: ${{ steps.target.outputs.new }}
+          PREVIEW: ${{ steps.target.outputs.preview }}
+        run: |
+          if [ "$PREVIEW" = "true" ]; then
+            title="Heads-up: upstream main conflicts with fork patches"
+          else
+            title="Upstream $NEW: rebase conflict"
+          fi
+          # The conflict details are already in the run summary; a failed run also triggers GitHub's email.
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .has_issues)" != "true" ]; then
+            echo "::error::$title. Issues are disabled on this repository, so no issue was opened; see the run summary. Enable them under Settings > General > Features."
+            exit 1
+          fi
+          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file conflict.md
+          else
+            gh issue create --title "$title" --body-file conflict.md
+          fi
+
+      - name: Push sync branch
+        if: steps.rebase.outputs.status == 'clean' && steps.target.outputs.preview != 'true'
+        env:
+          BRANCH: ${{ steps.rebase.outputs.branch }}
+        run: git push --force origin "HEAD:refs/heads/$BRANCH"
+
+  test:
+    name: Unit tests
+    needs: rebase
+    if: needs.rebase.outputs.status == 'clean' && needs.rebase.outputs.preview != 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.rebase.outputs.branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Frontend lint, tests and translation check
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run test
+          npm run i18n:check
+      - name: Polish translation overlay report
+        working-directory: frontend
+        run: node scripts/fork-i18n-check.js --strict | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Backend tests
+        working-directory: backend
+        # Upstream's internal/events tests are flaky (send on closed channel
+        # under load), so a failed run gets one retry before failing the sync.
+        run: go test ./... -timeout 120s || go test -count=1 ./... -timeout 120s
+
+  image:
+    name: Build image
+    needs: rebase
+    if: needs.rebase.outputs.status == 'clean' && needs.rebase.outputs.preview != 'true'
+    uses: ./.github/workflows/fork-image.yaml
+    with:
+      ref: ${{ needs.rebase.outputs.branch }}
+      push: false
+
+  promote:
+    name: Promote to custom
+    needs: [rebase, test, image]
+    runs-on: ubuntu-24.04-arm
+    # Add yourself as a required reviewer on this environment (Settings >
+    # Environments) to approve each upgrade; remove the reviewer to auto-publish.
+    environment: fork-promote
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.rebase.outputs.branch }}
+          fetch-depth: 0
+      - name: Update custom and snapshot
+        env:
+          BRANCH: ${{ needs.rebase.outputs.branch }}
+          NEW: ${{ needs.rebase.outputs.new }}
+          OLD: ${{ needs.rebase.outputs.old }}
+        run: |
+          git fetch --quiet origin "$FORK_BRANCH"
+          if [ "$FORK_BRANCH" = "custom" ]; then
+            # Keep the previous build as a rollback point.
+            git push origin "origin/$FORK_BRANCH:refs/heads/snapshot/$OLD" || true
+          fi
+          git push --force-with-lease="$FORK_BRANCH:origin/$FORK_BRANCH" origin "HEAD:refs/heads/$FORK_BRANCH"
+          if [ "$FORK_BRANCH" = "custom" ]; then
+            git push --force origin "HEAD:refs/heads/snapshot/$NEW"
+          fi
+          git push origin --delete "$BRANCH" || true
+          echo "Moved \`$FORK_BRANCH\` to $NEW" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish image
+    needs: [rebase, promote]
+    if: needs.rebase.outputs.fork_branch == 'custom'
+    uses: ./.github/workflows/fork-image.yaml
+    with:
+      ref: custom
+      push: true

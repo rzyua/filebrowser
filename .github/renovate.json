@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "fork: only update fork-owned files; upstream manages app dependencies. See FORK.md.",
+  "extends": ["config:recommended"],
+  "baseBranches": ["custom"],
+  "enabledManagers": ["github-actions"],
+  "github-actions": {
+    "fileMatch": ["^\\.github/workflows/fork-[^/]+\\.ya?ml$"]
+  },
+  "commitMessagePrefix": "fork:",
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "fork workflow actions",
+      "schedule": ["before 6am on monday"]
+    }
+  ]
+}

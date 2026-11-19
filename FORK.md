@@ -16,6 +16,7 @@ git log --oneline $(git tag --merged custom -l 'v*-stable' --sort=-v:refname | h
 | --- | --- | --- |
 | **Download-all button** in the share header, so shares with the sidebar disabled can still be downloaded in one click. Hidden for upload-only shares and shares with downloads disabled. | `frontend/src/components/fork/ShareDownloadAll.vue`, 3 lines in `frontend/src/views/bars/Default.vue` | Upstream adds an equivalent button |
 | **Zip by default**: multi-file and folder downloads skip the zip/tar.gz prompt. | `frontend/src/utils/download.js`, `frontend/src/api/resources.js` | Upstream adds a "default archive format" setting |
+| **Sidebar hidden by default** on new shares (the "Disable sidebar" toggle starts on; existing shares keep their setting). | 2 lines in `frontend/src/components/prompts/Share.vue` | Upstream adds a configurable share default |
 | **Polish translation** rewritten by hand (context-aware, consistent terminology, placeholders fixed). | `frontend/src/i18n/pl.json` | Never; re-check new keys after each upstream release |
 | **Fork tooling**: this file, `fork-*` workflows, Renovate config. | `FORK.md`, `.github/workflows/fork-*.yaml`, `.github/renovate.json` | - |
 

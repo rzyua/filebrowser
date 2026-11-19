@@ -427,7 +427,7 @@ export default {
       quickDownload: false,
       disableNavButtons: false,
       disableShareCard: false,
-      disableSidebar: false,
+      disableSidebar: true, // fork: hide the sidebar on new shares by default
       enforceDarkLightMode: "default",
       viewMode: "normal",
       enableOnlyOffice: false,
@@ -982,6 +982,7 @@ export default {
     populateDefaults() {
       this.title = this.$t("share.titleDefault", { title: this.item.name || "share" });
       this.description = this.$t("share.descriptionDefault");
+      this.disableSidebar = true; // fork: hide the sidebar on new shares by default
     },
     /**
      * @param {{path: string, source: string}} pathOrData

@@ -271,7 +271,7 @@ export default {
       quickDownload: false,
       disableNavButtons: false,
       disableShareCard: false,
-      disableSidebar: false,
+      disableSidebar: true, // fork: hide the sidebar on new shares by default
       enforceDarkLightMode: "default",
       viewMode: "normal",
       enableOnlyOffice: false,
@@ -895,6 +895,7 @@ export default {
           applyShareDefaultsToForm(form, {}, { titleDefault, descriptionDefault });
           this.sidebarLinks = form.sidebarLinks;
         }
+        this.disableSidebar = true; // fork: hide the sidebar on new shares by default
         return;
       }
       const form = {};
@@ -923,7 +924,8 @@ export default {
       this.quickDownload = form.quickDownload;
       this.disableNavButtons = form.hideNavButtons;
       this.disableShareCard = form.disableShareCard;
-      this.disableSidebar = form.disableSidebar;
+      // fork: hide the sidebar on new shares by default unless an admin enforces the value
+      this.disableSidebar = this.shareEnforced.disableSidebar ? form.disableSidebar : true;
       this.enforceDarkLightMode = form.enforceDarkLightMode;
       this.viewMode = form.viewMode;
       this.enableOnlyOffice = form.enableOnlyOffice;

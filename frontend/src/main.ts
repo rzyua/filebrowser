@@ -45,3 +45,6 @@ if (import.meta.env.DEV) {
 }
 
 void router.isReady().then(() => app.mount("#app"));
+
+// fork: hand-maintained translation overrides (ES imports are hoisted, so this runs at startup)
+import "@/i18n/fork/overlay";

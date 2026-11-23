@@ -435,17 +435,17 @@ class UploadManager {
     }
 
     const maxConcurrent = state.user.fileLoading?.maxConcurrentUpload || 3;
-    while (
-      this.activeUploads < maxConcurrent &&
-      this.hasPending()
-    ) {
-      const upload = this.queue.find((item) => item.status === "pending");
-      if (upload) {
-        if (this.overwriteAll) {
-          upload.overwrite = true;
-        }
-        this.start(upload.id);
+    while (this.activeUploads < maxConcurrent) {
+      const upload = this.nextStartableUpload();
+      if (!upload) {
+        // Nothing pending, or everything pending waits for a folder that is still
+        // being created; that folder's completion calls processQueue again.
+        break;
       }
+      if (this.overwriteAll) {
+        upload.overwrite = true;
+      }
+      this.start(upload.id);
     }
 
     // Update isUploading for close/navigation guards and beforeunload
@@ -465,6 +465,39 @@ class UploadManager {
       this.hadActiveUploads = false; // Reset the flag
       this.overwriteAll = null; // Reset for next batch of uploads
     }
+  }
+
+  /**
+   * First pending upload whose parent folders are not still queued or being created
+   * by a directory job of this queue. Starting a file before its folder exists on the
+   * server races the folder creation. If a folder job fails, its children still start
+   * (the server creates missing parent folders itself).
+   */
+  nextStartableUpload() {
+    const creatingDirs = new Set();
+    for (const item of this.queue) {
+      if (
+        item.type === "directory" &&
+        (item.status === "pending" || item.status === "uploading")
+      ) {
+        creatingDirs.add(`${item.source}::${item.path.replace(/\/+$/, "")}`);
+      }
+    }
+    return this.queue.find((item) => {
+      if (item.status !== "pending") {
+        return false;
+      }
+      if (creatingDirs.size === 0) {
+        return true;
+      }
+      const path = item.path.replace(/\/+$/, "");
+      for (let i = path.indexOf("/", 1); i > 0; i = path.indexOf("/", i + 1)) {
+        if (creatingDirs.has(`${item.source}::${path.slice(0, i)}`)) {
+          return false;
+        }
+      }
+      return true;
+    });
   }
 
   start(id) {

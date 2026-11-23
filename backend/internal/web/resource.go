@@ -809,7 +809,8 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 			logger.Debugf("%v", sessionErr)
 			return http.StatusBadRequest, sessionErr
 		}
-		if acquireErr := activeUploadSessions.acquire(realPath, sessionID); acquireErr != nil {
+		override := r.URL.Query().Get("override") == "true"
+		if acquireErr := activeUploadSessions.acquire(realPath, sessionID, override && offset == 0); acquireErr != nil {
 			if isUploadSessionConflict(acquireErr) {
 				logger.Debugf("%v", acquireErr)
 				drainRequestBody(r)
@@ -818,6 +819,17 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 			logger.Debugf("%v", acquireErr)
 			return http.StatusInternalServerError, acquireErr
 		}
+		defer activeUploadSessions.done(realPath, sessionID)
+		// keepClaim is set only on failures that leave a resumable partial temp file
+		// (interrupted chunk body, graceful pause) and on success of a non-final chunk.
+		// Every other exit releases the claim so a retry or overwrite is not blocked
+		// by a dead session.
+		keepClaim := false
+		defer func() {
+			if !keepClaim {
+				activeUploadSessions.release(realPath, sessionID)
+			}
+		}()
 
 		// On the first chunk, check for conflicts or handle override
 		if offset == 0 {
@@ -845,6 +857,14 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 				// If overriding, delete existing thumbnails
 				preview.DelThumbs(r.Context(), *fileInfo)
 			}
+		}
+
+		// The temp file lives next to the destination, so its directory must exist.
+		// The folder may be created by a concurrent request of the same upload batch
+		// that has not finished yet; create it here like the single-request path does.
+		if err = os.MkdirAll(filepath.Dir(realPath), fileutils.EffectiveDirPerm()); err != nil {
+			logger.Debugf("could not create parent directory: %v", err)
+			return http.StatusInternalServerError, fmt.Errorf("could not create parent directory: %v", err)
 		}
 
 		// Use a temporary file for chunks.
@@ -890,7 +910,8 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 				}
 			}
 
-			// Keep the partial temp file so the client can resume from offset.
+			// Keep the partial temp file and the claim so the client can resume from offset.
+			keepClaim = true
 			if gracefulPause {
 				logger.Debugf("chunk upload ended after graceful pause; keeping partial file (source=%s path=%s)", source, path)
 				return 499, nil
@@ -900,6 +921,8 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 		}
 
 		if err = validateReceivedBytes(chunkSize, 0, false, r.ContentLength); err != nil {
+			// A short body is an interrupted chunk; the client resumes from offset.
+			keepClaim = true
 			logger.Debugf("incomplete chunk: %v", err)
 			if truncErr := outFile.Truncate(offset); truncErr != nil {
 				logger.Debugf("could not truncate temp file after incomplete chunk (offset=%d): %v", offset, truncErr)
@@ -945,7 +968,8 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 			}
 			reconcileSharesAfterMove(false, source, source, tempFilePath, realPath)
 			activity.RecordUpload(r, toActor(d), source, path, false)
-			activeUploadSessions.release(realPath, sessionID)
+		} else {
+			keepClaim = true
 		}
 		if err = writeChunkUploadResponse(w, assembled, totalSize, assembled == totalSize); err != nil {
 			logger.Debugf("could not write chunk upload response: %v", err)
@@ -991,7 +1015,7 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 		logger.Debugf("%v", sessionErr)
 		return http.StatusBadRequest, sessionErr
 	}
-	if acquireErr := activeUploadSessions.acquire(realPath, sessionID); acquireErr != nil {
+	if acquireErr := activeUploadSessions.acquire(realPath, sessionID, r.URL.Query().Get("override") == "true"); acquireErr != nil {
 		if isUploadSessionConflict(acquireErr) {
 			logger.Debugf("%v", acquireErr)
 			return http.StatusConflict, acquireErr
@@ -999,6 +1023,9 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 		logger.Debugf("%v", acquireErr)
 		return http.StatusInternalServerError, acquireErr
 	}
+	defer activeUploadSessions.done(realPath, sessionID)
+	// A single-request upload never resumes, so always release its claim.
+	defer activeUploadSessions.release(realPath, sessionID)
 
 	tempFilePath := uploadTempPath(realPath, sessionID)
 	outFile, err := os.OpenFile(tempFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fileutils.PermFile)
@@ -1011,20 +1038,17 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 	closeErr := outFile.Close()
 	if copyErr != nil {
 		_ = os.Remove(tempFilePath)
-		activeUploadSessions.release(realPath, sessionID)
 		logger.Debugf("error writing file: %v", copyErr)
 		return ErrToStatus(copyErr), copyErr
 	}
 	if closeErr != nil {
 		_ = os.Remove(tempFilePath)
-		activeUploadSessions.release(realPath, sessionID)
 		logger.Debugf("error closing temp file: %v", closeErr)
 		return http.StatusInternalServerError, closeErr
 	}
 
 	if err = validateReceivedBytes(written, totalSize, hasTotalSize, r.ContentLength); err != nil {
 		_ = os.Remove(tempFilePath)
-		activeUploadSessions.release(realPath, sessionID)
 		logger.Debugf("%v", err)
 		return http.StatusBadRequest, err
 	}
@@ -1032,13 +1056,11 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 	err = files.MoveResource(false, source, source, tempFilePath, realPath)
 	if err != nil {
 		_ = os.Remove(tempFilePath)
-		activeUploadSessions.release(realPath, sessionID)
 		logger.Debugf("error writing file: %v", err)
 		return ErrToStatus(err), err
 	}
 	reconcileSharesAfterMove(false, source, source, tempFilePath, realPath)
 	activity.RecordUpload(r, toActor(d), source, path, false)
-	activeUploadSessions.release(realPath, sessionID)
 	return http.StatusOK, nil
 }
 

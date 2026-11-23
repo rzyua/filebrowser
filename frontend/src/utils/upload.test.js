@@ -435,3 +435,44 @@ describe("hasOngoingUploads", () => {
     state.user.fileLoading.clearAll = false;
   });
 });
+
+describe("folder creation ordering", () => {
+  // overwrite=true skips the top-level folder probe, so every folder is a queued job.
+  it("starts files inside a new folder only after the folder has been created", async () => {
+    const dirDone = deferred();
+    const started = [];
+    resourcesApi.post.mockImplementation((source, path) => {
+      started.push(path);
+      return path === "/base/new+folder/" ? dirDone.promise : Promise.resolve();
+    });
+
+    await uploadManager.add("/base/", [
+      { file: new File([new Uint8Array(16)], "big.dwg"), relativePath: "new+folder/big.dwg" },
+      { file: new File(["x"], "small.txt"), relativePath: "new+folder/sub/small.txt" },
+      { file: new File(["y"], "loose.txt"), relativePath: "loose.txt" },
+    ], true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Only the folder and the unrelated loose file may start before the folder exists.
+    expect(started).toEqual(["/base/new+folder/", "/base/loose.txt"]);
+
+    dirDone.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(started.slice(2, 4).sort()).toEqual(["/base/new+folder/big.dwg", "/base/new+folder/sub/"]);
+    expect(started.at(-1)).toBe("/base/new+folder/sub/small.txt");
+  });
+
+  it("still starts the files when creating their folder fails", async () => {
+    resourcesApi.post.mockImplementation((source, path) =>
+      path === "/base/dir/" ? Promise.reject(new Error("boom")) : Promise.resolve(),
+    );
+    await uploadManager.add("/base/", [
+      { file: new File(["x"], "a.txt"), relativePath: "dir/a.txt" },
+    ], true);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    const paths = resourcesApi.post.mock.calls.map((call) => call[1]);
+    expect(paths).toEqual(["/base/dir/", "/base/dir/a.txt"]);
+  });
+});

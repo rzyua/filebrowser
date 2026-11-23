@@ -881,7 +881,8 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 			logger.Debugf("%v", sessionErr)
 			return http.StatusBadRequest, sessionErr
 		}
-		if acquireErr := activeUploadSessions.acquire(realPath, sessionID); acquireErr != nil {
+		override := r.URL.Query().Get("override") == "true"
+		if acquireErr := activeUploadSessions.acquire(realPath, sessionID, override && offset == 0); acquireErr != nil {
 			if isUploadSessionConflict(acquireErr) {
 				logger.Debugf("%v", acquireErr)
 				abortConflictingUpload(w, r)
@@ -890,6 +891,7 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 			logger.Debugf("%v", acquireErr)
 			return http.StatusInternalServerError, acquireErr
 		}
+		defer activeUploadSessions.done(realPath, sessionID)
 		quotaReserved := false
 		quotaCtx := uploadQuotaContext(d, source, fullIndexPath, realPath, r, sessionID, totalSize, hasTotalSize)
 		abandonSession := true
@@ -934,6 +936,14 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 				// If overriding, delete existing thumbnails
 				preview.DelThumbs(r.Context(), *fileInfo)
 			}
+		}
+
+		// The temp file lives next to the destination, so its directory must exist.
+		// The folder may be created by a concurrent request of the same upload batch
+		// that has not finished yet; create it here like the single-request path does.
+		if err = os.MkdirAll(filepath.Dir(realPath), fileutils.EffectiveDirPerm()); err != nil {
+			logger.Debugf("could not create parent directory: %v", err)
+			return http.StatusInternalServerError, fmt.Errorf("could not create parent directory: %v", err)
 		}
 
 		// Use a temporary file for chunks.
@@ -1108,7 +1118,7 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 		logger.Debugf("%v", sessionErr)
 		return http.StatusBadRequest, sessionErr
 	}
-	if acquireErr := activeUploadSessions.acquire(realPath, sessionID); acquireErr != nil {
+	if acquireErr := activeUploadSessions.acquire(realPath, sessionID, r.URL.Query().Get("override") == "true"); acquireErr != nil {
 		if isUploadSessionConflict(acquireErr) {
 			logger.Debugf("%v", acquireErr)
 			abortConflictingUpload(w, r)
@@ -1117,6 +1127,7 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 		logger.Debugf("%v", acquireErr)
 		return http.StatusInternalServerError, acquireErr
 	}
+	defer activeUploadSessions.done(realPath, sessionID)
 
 	quotaCtx := uploadQuotaContext(d, source, fullIndexPath, realPath, r, sessionID, totalSize, hasTotalSize)
 	quotaReserved := false

@@ -687,3 +687,178 @@ func TestResourcePostHandler_PartialChunkResponse(t *testing.T) {
 		t.Fatalf("unexpected final payload: %+v", finalPayload)
 	}
 }
+
+func TestResourcePostHandler_ChunkedCreatesMissingParentDir(t *testing.T) {
+	root, user := setupUploadHTTPTest(t)
+	part1 := []byte("aaaa")
+	part2 := []byte("bbbb")
+	total := strconv.Itoa(len(part1) + len(part2))
+	headers := func(offset int) map[string]string {
+		return map[string]string{
+			"X-File-Upload-Session": "session-newdir",
+			"X-File-Chunk-Offset":   strconv.Itoa(offset),
+			"X-File-Total-Size":     total,
+		}
+	}
+
+	// The folder has not been created yet (its creation request is still in flight).
+	status, err := postUpload(t, user, "/new%2Bfolder/sub%20dir/big.dwg", bytes.NewReader(part1), int64(len(part1)), headers(0))
+	if status != http.StatusOK || err != nil {
+		t.Fatalf("chunk1 status=%d err=%v", status, err)
+	}
+	status, err = postUpload(t, user, "/new%2Bfolder/sub%20dir/big.dwg", bytes.NewReader(part2), int64(len(part2)), headers(len(part1)))
+	if status != http.StatusOK || err != nil {
+		t.Fatalf("chunk2 status=%d err=%v", status, err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "new+folder", "sub dir", "big.dwg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := append(append([]byte{}, part1...), part2...); !bytes.Equal(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestResourcePostHandler_ChunkedFailureReleasesSession(t *testing.T) {
+	root, user := setupUploadHTTPTest(t)
+	// A regular file where the parent directory should be makes the first chunk fail
+	// before anything is written.
+	blocker := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("aaaa")
+	headers := func(session string) map[string]string {
+		return map[string]string{
+			"X-File-Upload-Session": session,
+			"X-File-Chunk-Offset":   "0",
+			"X-File-Total-Size":     "4",
+		}
+	}
+	status, _ := postUpload(t, user, "/blocked/file.bin", bytes.NewReader(body), 4, headers("session-1"))
+	// Upstream may reject this earlier (e.g. 404 while resolving the parent); any
+	// failure works as long as the retry below is not blocked by the dead session.
+	if status < 400 {
+		t.Fatalf("status=%d, want a failure", status)
+	}
+
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	// A retry with a fresh session must not be rejected as a conflicting session.
+	status, err := postUpload(t, user, "/blocked/file.bin", bytes.NewReader(body), 4, headers("session-2"))
+	if status != http.StatusOK || err != nil {
+		t.Fatalf("retry status=%d err=%v", status, err)
+	}
+}
+
+func TestResourcePostHandler_ChunkedExistingFileConflictReleasesSession(t *testing.T) {
+	root, user := setupUploadHTTPTest(t)
+	realPath := filepath.Join(root, "exists.bin")
+	if err := os.WriteFile(realPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("newer")
+	headers := func(session string) map[string]string {
+		return map[string]string{
+			"X-File-Upload-Session": session,
+			"X-File-Chunk-Offset":   "0",
+			"X-File-Total-Size":     strconv.Itoa(len(body)),
+		}
+	}
+	status, _ := postUpload(t, user, "/exists.bin", bytes.NewReader(body), int64(len(body)), headers("session-1"))
+	if status != http.StatusConflict {
+		t.Fatalf("status=%d, want 409 for existing file", status)
+	}
+	// The rejected first chunk must not leave its session holding the path: a new
+	// session (e.g. after the user deletes the old file, or chooses to overwrite) gets in.
+	// (The overwrite branch itself needs the preview service, which these tests don't start.)
+	if err := os.Remove(realPath); err != nil {
+		t.Fatal(err)
+	}
+	status, err := postUpload(t, user, "/exists.bin", bytes.NewReader(body), int64(len(body)), headers("session-2"))
+	if status != http.StatusOK || err != nil {
+		t.Fatalf("overwrite status=%d err=%v", status, err)
+	}
+	got, err := os.ReadFile(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("got %q want %q", got, body)
+	}
+}
+
+func TestResourcePostHandler_OverwriteTakesOverAbandonedSession(t *testing.T) {
+	root, user := setupUploadHTTPTest(t)
+	realPath := filepath.Join(root, "abandoned.bin")
+	status, err := postUpload(t, user, "/abandoned.bin", bytes.NewReader([]byte("aaaa")), 4, map[string]string{
+		"X-File-Upload-Session": "session-old",
+		"X-File-Chunk-Offset":   "0",
+		"X-File-Total-Size":     "8",
+	})
+	if status != http.StatusOK || err != nil {
+		t.Fatalf("chunk1 status=%d err=%v", status, err)
+	}
+
+	body := []byte("fresh")
+	newHeaders := map[string]string{
+		"X-File-Upload-Session": "session-new",
+		"X-File-Chunk-Offset":   "0",
+		"X-File-Total-Size":     strconv.Itoa(len(body)),
+	}
+	// Right after a chunk the old session may still be active: keep protecting it.
+	status, err = postUpload(t, user, "/abandoned.bin&override=true", bytes.NewReader(body), int64(len(body)), newHeaders)
+	if status != http.StatusConflict || err == nil {
+		t.Fatalf("status=%d err=%v, want 409 within grace period", status, err)
+	}
+
+	activeUploadSessions.idleForTest(realPath, uploadSessionTakeoverGrace+time.Second)
+
+	// Without override an idle session still blocks.
+	status, err = postUpload(t, user, "/abandoned.bin", bytes.NewReader(body), int64(len(body)), map[string]string{
+		"X-File-Upload-Session": "session-other",
+		"X-File-Chunk-Offset":   "0",
+		"X-File-Total-Size":     strconv.Itoa(len(body)),
+	})
+	if status != http.StatusConflict || err == nil {
+		t.Fatalf("status=%d err=%v, want 409 without override", status, err)
+	}
+
+	// An explicit overwrite replaces the abandoned session.
+	status, err = postUpload(t, user, "/abandoned.bin&override=true", bytes.NewReader(body), int64(len(body)), newHeaders)
+	if status != http.StatusOK || err != nil {
+		t.Fatalf("overwrite status=%d err=%v", status, err)
+	}
+	got, err := os.ReadFile(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("got %q want %q", got, body)
+	}
+}
+
+func TestUploadSessionRegistry_NoTakeoverWhileInFlight(t *testing.T) {
+	var reg uploadSessionRegistry
+	const p = "/x/file.bin"
+	if err := reg.acquire(p, "a", false); err != nil {
+		t.Fatal(err)
+	}
+	reg.idleForTest(p, uploadSessionTakeoverGrace+time.Second)
+	if err := reg.acquire(p, "b", true); !isUploadSessionConflict(err) {
+		t.Fatalf("err=%v, want conflict while a request is in flight", err)
+	}
+	reg.done(p, "a")
+	if err := reg.acquire(p, "b", true); !isUploadSessionConflict(err) {
+		t.Fatalf("err=%v, want conflict right after the last request", err)
+	}
+	reg.idleForTest(p, uploadSessionTakeoverGrace+time.Second)
+	if err := reg.acquire(p, "b", true); err != nil {
+		t.Fatalf("takeover err=%v", err)
+	}
+	// The displaced session can no longer continue.
+	if err := reg.acquire(p, "a", false); !isUploadSessionConflict(err) {
+		t.Fatalf("err=%v, want conflict for displaced session", err)
+	}
+}

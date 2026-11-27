@@ -41,6 +41,15 @@ server:
         defaultEnabled: true              # should be added as a default source for new users?
         createUserDir: false              # create a user directory for each user under defaultUserScope + username
         useLogicalSize: false             # calculate sizes based on logical size instead of disk utilization (du -sh), folders will be 0 bytes when empty.
+        backgroundScan:                   # fork: when background indexing scans run (fixed daily rescan, skip while the disk sleeps)
+          fullRescanAt: ""                # FullRescanAt runs a full rescan of the source every day at this local time ("HH:MM", 24h).
+                                          # The time zone is the server's (the TZ environment variable in Docker).
+                                          # On its own it replaces the adaptive schedule: no other background scans run.
+                                          # Combined with onlyWhenDiskAwake, adaptive scans keep running in between, but only while the disk is awake.
+          onlyWhenDiskAwake: false        # OnlyWhenDiskAwake skips adaptive background scans while the source's disk is in standby,
+                                          # and runs them once it is spinning again. The nightly full rescan (fullRescanAt) always runs.
+          disks:                          # Disks overrides the block devices checked by onlyWhenDiskAwake (eg. "/dev/sda").
+                                          # By default they are found from the source path (partitions, LVM and mdraid are followed).
         defaultPermissions:               # DefaultPermissions is the template for new user scopes on this source (also synced globally via Access settings).
           view: false
           download: false

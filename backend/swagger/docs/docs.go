@@ -5779,6 +5779,26 @@ const docTemplate = `{
                 }
             }
         },
+        "settings.BackgroundScanConfig": {
+            "type": "object",
+            "properties": {
+                "disks": {
+                    "description": "Disks overrides the block devices checked by onlyWhenDiskAwake (eg. \"/dev/sda\").\nBy default they are found from the source path (partitions, LVM and mdraid are followed).",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "fullRescanAt": {
+                    "description": "FullRescanAt runs a full rescan of the source every day at this local time (\"HH:MM\", 24h).\nThe time zone is the server's (the TZ environment variable in Docker).\nOn its own it replaces the adaptive schedule: no other background scans run.\nCombined with onlyWhenDiskAwake, adaptive scans keep running in between, but only while the disk is awake.",
+                    "type": "string"
+                },
+                "onlyWhenDiskAwake": {
+                    "description": "OnlyWhenDiskAwake skips adaptive background scans while the source's disk is in standby,\nand runs them once it is spinning again. The nightly full rescan (fullRescanAt) always runs.",
+                    "type": "boolean"
+                }
+            }
+        },
         "settings.ConditionalRule": {
             "type": "object",
             "properties": {
@@ -6797,6 +6817,14 @@ const docTemplate = `{
         "settings.SourceConfig": {
             "type": "object",
             "properties": {
+                "backgroundScan": {
+                    "description": "fork: when background indexing scans run (fixed daily rescan, skip while the disk sleeps)",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/settings.BackgroundScanConfig"
+                        }
+                    ]
+                },
                 "createUserDir": {
                     "description": "create a user directory for each user under defaultUserScope + username",
                     "type": "boolean"

@@ -1950,7 +1950,7 @@ func (idx *Index) shouldInclude(baseName string) bool {
 
 // useAdaptiveScheduling reports whether the index uses tiered/aligned scheduling.
 func (idx *Index) useAdaptiveScheduling() bool {
-	return true
+	return !idx.forkFixedOnly() // fork: off when the daily full rescan is the only background scan
 }
 
 // Save persists the index and scanner information to the database and notifies clients via SSE.

@@ -255,6 +255,7 @@ type SourceConfig struct {
 	DefaultEnabled   bool              `json:"defaultEnabled"`          // should be added as a default source for new users?
 	CreateUserDir    bool              `json:"createUserDir"`           // create a user directory for each user under defaultUserScope + username
 	UseLogicalSize   bool              `json:"useLogicalSize"`          // calculate sizes based on logical size instead of disk utilization (du -sh), folders will be 0 bytes when empty.
+	BackgroundScan   BackgroundScanConfig `json:"backgroundScan,omitempty"` // fork: when background indexing scans run (fixed daily rescan, skip while the disk sleeps)
 	// DefaultPermissions is the template for new user scopes on this source (also synced globally via Access settings).
 	DefaultPermissions users.SourceFilePermissions `json:"defaultPermissions,omitempty" yaml:"defaultPermissions,omitempty"`
 	// DefaultPermissionsFromConfig holds permission flags explicitly set under defaultPermissions in config YAML.

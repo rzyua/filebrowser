@@ -32,8 +32,13 @@ type forkScanState struct {
 var forkStates sync.Map // *Index -> *forkScanState
 
 func (idx *Index) forkState() *forkScanState {
-	st, _ := forkStates.LoadOrStore(idx, &forkScanState{})
-	return st.(*forkScanState)
+	v, _ := forkStates.LoadOrStore(idx, &forkScanState{})
+	st, ok := v.(*forkScanState)
+	if !ok {
+		st = &forkScanState{}
+		forkStates.Store(idx, st)
+	}
+	return st
 }
 
 func (idx *Index) forkRescanEnabled() bool {

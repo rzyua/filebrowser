@@ -285,6 +285,28 @@ definitions:
         description: 'secret: secret used to encrypt TOTP secrets'
         type: string
     type: object
+  settings.BackgroundScanConfig:
+    properties:
+      disks:
+        description: |-
+          Disks overrides the block devices checked by onlyWhenDiskAwake (eg. "/dev/sda").
+          By default they are found from the source path (partitions, LVM and mdraid are followed).
+        items:
+          type: string
+        type: array
+      fullRescanAt:
+        description: |-
+          FullRescanAt runs a full rescan of the source every day at this local time ("HH:MM", 24h).
+          The time zone is the server's (the TZ environment variable in Docker).
+          On its own it replaces the adaptive schedule: no other background scans run.
+          Combined with onlyWhenDiskAwake, adaptive scans keep running in between, but only while the disk is awake.
+        type: string
+      onlyWhenDiskAwake:
+        description: |-
+          OnlyWhenDiskAwake skips adaptive background scans while the source's disk is in standby,
+          and runs them once it is spinning again. The nightly full rescan (fullRescanAt) always runs.
+        type: boolean
+    type: object
   settings.ConditionalRule:
     properties:
       fileEndsWith:
@@ -1064,6 +1086,11 @@ definitions:
     type: object
   settings.SourceConfig:
     properties:
+      backgroundScan:
+        allOf:
+        - $ref: '#/definitions/settings.BackgroundScanConfig'
+        description: 'fork: when background indexing scans run (fixed daily rescan,
+          skip while the disk sleeps)'
       createUserDir:
         description: create a user directory for each user under defaultUserScope
           + username

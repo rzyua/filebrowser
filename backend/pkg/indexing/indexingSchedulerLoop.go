@@ -273,6 +273,9 @@ func (idx *Index) schedulerAdaptiveTick() {
 		if len(batch) == 0 {
 			break
 		}
+		if idx.forkDeferIfDiskAsleep(batch) { // fork: skip while the disk sleeps
+			continue
+		}
 		drainedAny = true
 		sort.Slice(batch, func(i, j int) bool {
 			return batch[i].scanPath < batch[j].scanPath
@@ -316,10 +319,12 @@ func (idx *Index) runIndexScheduler() {
 	n := len(idx.scanners)
 	idx.mu.RUnlock()
 	logger.Debugf("[%s] scheduler: started adaptive scanners=%d", idx.Name, n)
+	idx.forkSchedulerStart() // fork
 	idx.schedulerAdaptiveTick()
 	for {
 		now := time.Now()
 		next := idx.earliestSlotWake(now)
+		next = idx.forkWake(now, next) // fork: daily full rescan
 		d := time.Until(next).Truncate(time.Second)
 		if d < time.Second {
 			d = time.Second
@@ -330,6 +335,9 @@ func (idx *Index) runIndexScheduler() {
 			logger.Debugf("[%s] scheduler: adaptive loop stopped", idx.Name)
 			return
 		case <-time.After(d):
+			if idx.forkRunDueFullRescan() { // fork
+				continue
+			}
 			idx.schedulerAdaptiveTick()
 		}
 	}

@@ -468,6 +468,9 @@ func setupSources(generate bool) {
 			}
 			modifyExcludeInclude(source)
 			setConditionals(source)
+			if err := validateBackgroundScan(source); err != nil { // fork
+				logger.Fatal(err.Error())
+			}
 			if source.Config.DefaultUserScope == "" {
 				source.Config.DefaultUserScope = "/"
 			}

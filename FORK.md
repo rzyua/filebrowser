@@ -18,6 +18,7 @@ git log --oneline $(git tag --merged custom -l 'v*-stable' --sort=-v:refname | h
 | **Zip by default**: multi-file and folder downloads skip the zip/tar.gz prompt. | `frontend/src/utils/download.js`, `frontend/src/api/resources.js` | Upstream adds a "default archive format" setting |
 | **Sidebar hidden by default** on new shares (the "Disable sidebar" toggle starts on; existing shares keep their setting). | 2 lines in `frontend/src/components/prompts/Share.vue` | Upstream `main` (2.1 beta line) already has admin-configurable share defaults. When that reaches a stable release this commit will conflict; drop it (`git rebase` → `drop`) and set the default in upstream's settings instead |
 | **Polish translation** rewritten by hand, kept as an overlay merged over upstream's `pl.json` at load time, so upstream's translation updates never conflict. New upstream strings show upstream's text until added to the overlay. | `frontend/src/i18n/fork/pl.json`, `frontend/src/i18n/fork/overlay.ts`, 1 line in `frontend/src/main.ts`, `frontend/scripts/fork-i18n-check.js` | Never; add new strings after each upstream release (see below) |
+| **Background scan schedule** per source (`backgroundScan` in config.yaml, see below): a daily full rescan at a fixed time, and/or adaptive scans only while the disk is already spinning, for sources on HDDs that spin down. Unset keeps upstream's adaptive schedule. | `backend/pkg/indexing/fork_*.go`, `backend/pkg/settings/fork_background_scan.go`, a few `// fork:` lines in `settings/structs.go`, `settings/config.go`, `indexing/indexingFiles.go` and `indexing/indexingSchedulerLoop.go` | Upstream adds scan scheduling options |
 | **Fork tooling**: this file, `fork-*` workflows, Renovate config. | `FORK.md`, `.github/workflows/fork-*.yaml`, `.github/renovate.json` | - |
 
 Rules that keep upstream syncs cheap:
@@ -27,6 +28,34 @@ Rules that keep upstream syncs cheap:
 - New UI strings live inside the fork component (see `ShareDownloadAll.vue`), not in the 26 locale files.
 - Translation fixes go in `frontend/src/i18n/fork/<locale>.json`, never in upstream's locale files.
 - Don't bump Go or npm dependencies in the fork; upstream does that.
+
+## Background scan schedule
+
+Per source, under `config:`. Both options are opt-in and can be combined.
+
+```yaml
+server:
+  sources:
+    - path: /data
+      config:
+        backgroundScan:
+          fullRescanAt: "03:30"     # daily full rescan, server local time
+          onlyWhenDiskAwake: true   # adaptive scans only while the disk spins
+          disks: ["/dev/sda"]       # optional, normally found from the path
+```
+
+| Setting | Behaviour |
+| --- | --- |
+| neither | Upstream's adaptive schedule (5 min to 12 h). |
+| `fullRescanAt` only | One full rescan of the whole source per day, nothing else in the background. |
+| `onlyWhenDiskAwake` only | Adaptive schedule, but a scan that comes due while a disk is in standby waits and is retried every 5 minutes until the disk is spinning. |
+| both | Adaptive scans while the disk is awake, plus the daily full rescan, which always runs. |
+
+Notes:
+
+- **Time zone**: the server's local zone. In Docker set `TZ` (eg. `TZ=Europe/Warsaw`); without it the container runs on UTC. The startup log prints the next rescan time.
+- **Startup**: a new or rebuilt index is scanned once at startup in every mode, so search works right away. A restart with an existing index does not scan in `fullRescanAt`-only mode; a rescan missed while the server was down is not caught up, it waits for the next day. Changes made through the UI, WebDAV or API update the index immediately in every mode; files changed directly on disk show up after the next scan (or when the folder is opened).
+- **Disk check**: tries the ATA CHECK POWER MODE query first (what `hdparm -C` does; answered from standby without spinning up). That needs root and the device: in Docker `user: "0:0"`, `cap_add: [SYS_RAWIO]` and `devices: ["/dev/sda"]`. Without those it logs one warning and falls back to reading `/sys/block/<disk>/stat`, which needs no privileges: the disk counts as awake if it completed I/O in the last 5 minutes. Keep the drive's spin-down timeout above 5 minutes for the fallback to be accurate. SSDs and NVMe always count as awake; LVM, dm-crypt and mdraid count as awake only when every member disk is. For btrfs, ZFS or other filesystems without a single block device set `disks`. If no disk can be found, scans run as usual and a warning is logged.
 
 ## Branches
 
